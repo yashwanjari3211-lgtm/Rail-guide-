@@ -1,6 +1,27 @@
-import { GoogleGenAI, Modality } from "@google/genai";
+import { GoogleGenAI, Modality, LiveServerMessage } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+export const connectLive = (callbacks: {
+  onopen: () => void;
+  onmessage: (message: LiveServerMessage) => void;
+  onerror: (error: any) => void;
+  onclose: () => void;
+}) => {
+  return ai.live.connect({
+    model: "gemini-2.5-flash-native-audio-preview-09-2025",
+    callbacks,
+    config: {
+      responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } },
+      },
+      outputAudioTranscription: {},
+      inputAudioTranscription: {},
+      systemInstruction: "You are a helpful Indian Railways assistant. You help users with train information, booking guidance, and general queries about Indian trains. You are speaking to the user in real-time.",
+    },
+  });
+};
 
 export const getGeneralResponse = async (prompt: string) => {
   const response = await ai.models.generateContent({
