@@ -1,0 +1,7 @@
+{
+  "name": "RailGuide AI",
+  "description": "A comprehensive train companion app with live status, seat availability, and AI-powered journey planning using Google Maps grounding.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
