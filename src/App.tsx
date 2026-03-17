@@ -48,6 +48,7 @@ export default function App() {
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [userTranscription, setUserTranscription] = useState('');
   const [aiTranscription, setAiTranscription] = useState('');
+
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Voice Refs
@@ -253,17 +254,17 @@ export default function App() {
       const result = await searchTrains(query);
       if (result.status && result.data) {
         const mappedTrains = result.data.map((t: any) => ({
-          number: t.train_no,
-          name: t.train_name,
-          from: t.source_stn_name,
-          to: t.dest_stn_name,
-          departureTime: t.from_time,
-          arrivalTime: t.to_time,
+          number: t.train_number || t.train_no,
+          name: t.train_name || t.eng_train_name,
+          from: t.src_stn_name || t.source_stn_name || 'N/A',
+          to: t.dstn_stn_name || t.dest_stn_name || 'N/A',
+          departureTime: t.from_time || 'N/A',
+          arrivalTime: t.to_time || 'N/A',
           runningDays: t.run_days || ['Daily']
         }));
         setSearchResults(mappedTrains);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Search error:", error);
     } finally {
       setIsSearching(false);
@@ -280,7 +281,7 @@ export default function App() {
       if (status.status) {
         setLiveStatus(status);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Status fetch error:", error);
     } finally {
       setIsFetchingStatus(false);
@@ -306,7 +307,7 @@ export default function App() {
         }));
         setSeatResults(mappedTrains);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Seat search error:", error);
     } finally {
       setIsSearchingSeats(false);
@@ -323,7 +324,7 @@ export default function App() {
             : res
         ));
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Check availability error:", error);
     }
   };
@@ -337,7 +338,7 @@ export default function App() {
       if (result.status) {
         setPnrResult(result.data);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("PNR check error:", error);
     } finally {
       setIsCheckingPnr(false);
@@ -393,7 +394,7 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 overflow-y-auto pb-20">
         <div className="max-w-md mx-auto p-4 space-y-4">
-          
+
           {activeTab === 'spot' && (
             <div className="space-y-4">
               {!selectedTrain ? (
