@@ -13,16 +13,19 @@ import {
   Map as MapIcon,
   Info,
   Mic,
-  MicOff
+  MicOff,
+  Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { TabType, Message, Train, LiveStatus, SeatAvailability } from './types';
+import LocationPicker from './components/LocationPicker';
 import { getGeneralResponse, getJourneyPlan, connectLive } from './services/gemini';
 import { fetchLiveTrainStatus, searchTrains, fetchSeatAvailability, fetchTrainsBetweenStations, fetchPnrStatus, LiveStatusResponse } from './services/railApi';
 import { cn } from './utils';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('spot');
+  const [showLocationPicker, setShowLocationPicker] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Train[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -32,6 +35,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [location, setLocation] = useState<{ lat: number; lng: number } | undefined>();
+  const [savedLocation, setSavedLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [fromStation, setFromStation] = useState('');
   const [toStation, setToStation] = useState('');
   const [travelDate, setTravelDate] = useState(new Date().toISOString().split('T')[0]);
@@ -54,11 +58,11 @@ export default function App() {
   // Voice Refs
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const processorRef = useRef<AudioWorkletNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const activeAudioChunksRef = useRef(0);
-  const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const silenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (navigator.geolocation) {
@@ -69,6 +73,13 @@ export default function App() {
     }
     return () => stopVoice();
   }, []);
+
+  const handleLocationSelect = (selectedLocation: { lat: number; lng: number }) => {
+    setSavedLocation(selectedLocation);
+    setLocation(selectedLocation);
+    // You can save to backend/state here
+    console.log('Location selected:', selectedLocation);
+  };
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -85,98 +96,134 @@ export default function App() {
       nextStartTimeRef.current = audioContext.currentTime;
       
       const source = audioContext.createMediaStreamSource(stream);
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-      processorRef.current = processor;
-
-      const sessionPromise = connectLive({
-        onopen: () => {
-          setIsVoiceActive(true);
-          setMessages(prev => [...prev, { role: 'model', text: "Voice session started. I'm listening..." }]);
-        },
-        onmessage: async (message) => {
-          if (message.serverContent?.modelTurn?.parts[0]?.inlineData?.data) {
-            const base64Audio = message.serverContent.modelTurn.parts[0].inlineData.data;
-            playAudio(base64Audio);
-          }
-          
-          // Handle AI Transcription
-          const modelTurn = message.serverContent?.modelTurn;
-          if (modelTurn?.parts) {
-            const text = modelTurn.parts.map(p => p.text).join('');
-            if (text) {
-              setAiTranscription(prev => prev + text);
+      
+      // Create AudioWorkletNode instead of deprecated ScriptProcessorNode
+      await audioContext.audioWorklet.addModule(
+        URL.createObjectURL(
+          new Blob([
+            `class AudioProcessor extends AudioWorkletProcessor {
+              process(inputs, outputs, parameters) {
+                const input = inputs[0];
+                if (input.length > 0) {
+                  const inputData = input[0];
+                  
+                  // Calculate volume for visual feedback
+                  let sum = 0;
+                  for (let i = 0; i < inputData.length; i++) {
+                    sum += inputData[i] * inputData[i];
+                  }
+                  const rms = Math.sqrt(sum / inputData.length);
+                  
+                  // Send volume data to main thread
+                  this.port.postMessage({ rms });
+                  
+                  // Convert to PCM and send to Gemini
+                  const pcmData = new Int16Array(inputData.length);
+                  for (let i = 0; i < inputData.length; i++) {
+                    pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+                  }
+                  
+                  // Send PCM data to main thread
+                  this.port.postMessage({ pcmData: pcmData.buffer }, [pcmData.buffer]);
+                }
+                return true;
+              }
             }
-          }
+            registerProcessor('audio-processor', AudioProcessor);`
+          ], { type: 'application/javascript' })
+        )
+      );
+      
+      const workletNode = new AudioWorkletNode(audioContext, 'audio-processor');
+      processorRef.current = workletNode;
 
-          // Handle User Transcription (using any to bypass linter for potentially missing fields)
-          const userTurn = (message.serverContent as any)?.userTurn;
-          if (userTurn?.parts) {
-            const text = userTurn.parts.map((p: any) => p.text).join('');
-            if (text) {
-              setUserTranscription(text);
-              setAiTranscription(''); // Clear AI transcription when user starts speaking
-            }
-          }
-
-          if (message.serverContent?.turnComplete) {
-            // Optional: Finalize transcriptions or clear them for next turn
-          }
-
-          if (message.serverContent?.interrupted) {
-            // Stop current playback on interruption
-            nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
-            setIsAiSpeaking(false);
-            setAiTranscription('');
-          }
-        },
-        onerror: (err) => {
-          console.error("Live API Error:", err);
-          stopVoice();
-        },
-        onclose: () => stopVoice(),
-      });
-
-      sessionRef.current = await sessionPromise;
-
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
+      // Handle messages from AudioWorklet
+      workletNode.port.onmessage = (event) => {
+        const { rms, pcmData } = event.data;
         
-        // Calculate volume for visual feedback
-        let sum = 0;
-        for (let i = 0; i < inputData.length; i++) {
-          sum += inputData[i] * inputData[i];
-        }
-        const rms = Math.sqrt(sum / inputData.length);
-        if (rms > 0.01) {
-          setIsUserSpeaking(true);
-          if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
-          silenceTimeoutRef.current = setTimeout(() => setIsUserSpeaking(false), 500);
-        }
-
-        const pcmData = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+        if (rms !== undefined) {
+          if (rms > 0.01) {
+            setIsUserSpeaking(true);
+            if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
+            silenceTimeoutRef.current = setTimeout(() => setIsUserSpeaking(false), 500);
+          }
         }
         
-        // More robust base64 encoding
-        const uint8Array = new Uint8Array(pcmData.buffer);
-        let binary = '';
-        const len = uint8Array.byteLength;
-        for (let i = 0; i < len; i++) {
-          binary += String.fromCharCode(uint8Array[i]);
-        }
-        const base64Data = btoa(binary);
+        if (pcmData && sessionRef.current) {
+          const uint8Array = new Uint8Array(pcmData);
+          let binary = '';
+          const len = uint8Array.byteLength;
+          for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(uint8Array[i]);
+          }
+          const base64Data = btoa(binary);
 
-        sessionRef.current?.sendRealtimeInput({
-          media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
-        });
+          sessionRef.current?.sendRealtimeInput({
+            media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+          });
+        }
       };
 
-      source.connect(processor);
-      processor.connect(audioContext.destination);
+      // Start voice session using the original connectLive function with enhanced system instruction
+      const session = await connectLive(
+        {
+          onopen: () => {
+            setIsVoiceActive(true);
+            setMessages(prev => [...prev, { role: 'model', text: "Voice session started with full API access. I'm listening..." }]);
+          },
+          onmessage: async (message) => {
+            if (message.serverContent?.modelTurn?.parts[0]?.inlineData?.data) {
+              const base64Audio = message.serverContent.modelTurn.parts[0].inlineData.data;
+              playAudio(base64Audio);
+            }
+            
+            // Handle AI Transcription
+            const modelTurn = message.serverContent?.modelTurn;
+            if (modelTurn?.parts) {
+              const text = modelTurn.parts.map(p => p.text).join('');
+              if (text) {
+                setAiTranscription(prev => prev + text);
+              }
+            }
+
+            // Handle User Transcription
+            const userTurn = (message.serverContent as any)?.userTurn;
+            if (userTurn?.parts) {
+              const text = userTurn.parts.map((p: any) => p.text).join('');
+              if (text) {
+                setUserTranscription(text);
+                setAiTranscription(''); // Clear AI transcription when user starts speaking
+              }
+            }
+
+            if (message.serverContent?.turnComplete) {
+              // Optional: Finalize transcriptions or clear them for next turn
+            }
+
+            if (message.serverContent?.interrupted) {
+              // Stop current playback on interruption
+              nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
+              setIsAiSpeaking(false);
+              setAiTranscription('');
+            }
+          },
+          onerror: (err) => {
+            console.error("Voice API Error:", err);
+            stopVoice();
+          },
+          onclose: () => stopVoice(),
+        },
+        location
+      );
+
+      sessionRef.current = session;
+
+      // Connect audio nodes
+      source.connect(workletNode);
+      workletNode.connect(audioContext.destination);
       
     } catch (err) {
-      console.error("Failed to start voice:", err);
+      console.error("Failed to start enhanced voice:", err);
       alert("Please allow microphone access to use voice interaction.");
     }
   };
@@ -926,8 +973,101 @@ export default function App() {
             </div>
           )}
 
+          {activeTab === 'location' && (
+            <div className="space-y-6 py-8">
+              <div className="text-center">
+                <div className="w-20 h-20 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-600 mx-auto mb-4">
+                  <MapPin className="w-10 h-10" />
+                </div>
+                <h2 className="text-2xl font-bold">Location Settings</h2>
+                <p className="text-slate-500 mt-2">Set your preferred location for better journey planning</p>
+              </div>
+
+              <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="font-bold text-lg">Current Location</h3>
+                    <p className="text-slate-500 text-sm">
+                      {location 
+                        ? `Lat: ${location.lat.toFixed(4)}, Lng: ${location.lng.toFixed(4)}`
+                        : 'Location not available'
+                      }
+                    </p>
+                  </div>
+                  <div className="text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full">
+                    {location ? 'Detected' : 'Not Available'}
+                  </div>
+                </div>
+
+                {savedLocation && (
+                  <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-100">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Check className="w-4 h-4 text-emerald-600" />
+                      <span className="font-bold text-emerald-700">Saved Location</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <div className="text-xs font-bold text-slate-400 uppercase">Latitude</div>
+                        <div className="font-mono font-bold">{savedLocation.lat.toFixed(6)}</div>
+                      </div>
+                      <div>
+                        <div className="text-xs font-bold text-slate-400 uppercase">Longitude</div>
+                        <div className="font-mono font-bold">{savedLocation.lng.toFixed(6)}</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <button 
+                  onClick={() => setShowLocationPicker(true)}
+                  className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2"
+                >
+                  <MapPin className="w-5 h-5" />
+                  Pick My Location on Map
+                </button>
+
+                <button 
+                  onClick={() => {
+                    if (navigator.geolocation) {
+                      navigator.geolocation.getCurrentPosition(
+                        (pos) => {
+                          const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                          setSavedLocation(loc);
+                          setLocation(loc);
+                        },
+                        (err) => alert('Location permission denied. Please allow location access.')
+                      );
+                    }
+                  }}
+                  className="w-full bg-white border border-slate-200 text-slate-700 py-4 rounded-2xl font-bold hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
+                >
+                  <Navigation className="w-5 h-5" />
+                  Use My Current Location
+                </button>
+              </div>
+
+              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                <h4 className="font-bold text-slate-700 mb-2">How it helps:</h4>
+                <ul className="text-sm text-slate-600 space-y-1">
+                  <li>• Better journey planning from your location</li>
+                  <li>• Accurate distance calculations</li>
+                  <li>• Nearby station suggestions</li>
+                  <li>• Personalized travel recommendations</li>
+                </ul>
+              </div>
+            </div>
+          )}
+
         </div>
       </main>
+
+      {showLocationPicker && (
+        <LocationPicker
+          onLocationSelect={handleLocationSelect}
+          initialLocation={savedLocation || location}
+          onClose={() => setShowLocationPicker(false)}
+        />
+      )}
 
       {/* Navigation Bar */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-2 py-2 shadow-[0_-4px_10px_rgba(0,0,0,0.05)]">
@@ -956,6 +1096,12 @@ export default function App() {
             icon={<MessageSquare className="w-5 h-5" />} 
             label="AI Guide" 
             isSpecial
+          />
+          <NavButton 
+            active={activeTab === 'location'} 
+            onClick={() => setActiveTab('location')} 
+            icon={<MapPin className="w-5 h-5" />} 
+            label="Location" 
           />
         </div>
       </nav>

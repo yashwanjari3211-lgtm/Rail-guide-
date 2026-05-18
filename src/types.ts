@@ -24,11 +24,23 @@ export interface SeatAvailability {
   fare: number;
 }
 
-export type TabType = 'spot' | 'pnr' | 'seats' | 'ai';
+export type TabType = 'spot' | 'pnr' | 'seats' | 'ai' | 'location';
 
 export interface Message {
   role: 'user' | 'model';
   text: string;
-  type?: 'general' | 'planning';
+  type?: 'general' | 'planning' | 'voice';
   groundingChunks?: any[];
+  toolCall?: {
+    name: string;
+    parameters: any;
+    result?: any;
+  };
+  metroRoute?: {
+    fromStation: string;
+    toStation: string;
+    line: string;
+    stops: number;
+    distance: string;
+  };
 }

@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 // Use the Express proxy to avoid CORS issues and hide API keys
-const BASE_URL = '/api/rapidapi';
+const BASE_URL = '/api/railradar';
 
 export interface LiveStatusResponse {
   status: boolean;
